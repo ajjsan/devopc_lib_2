@@ -50,6 +50,29 @@ def http_json(
         return exc.code, payload
 
 
+def _is_transient_http_error(exc: BaseException) -> bool:
+    """Сразу после docker compose порт может быть открыт, а uvicorn ещё нет — обрыв без ответа."""
+    if isinstance(exc, urllib.error.URLError):
+        return True
+    if isinstance(exc, ConnectionError):
+        return True
+    if isinstance(exc, TimeoutError):
+        return True
+    if isinstance(exc, OSError):
+        msg = str(exc).lower()
+        return any(
+            s in msg
+            for s in (
+                "remote end closed",
+                "connection refused",
+                "connection reset",
+                "broken pipe",
+                "timed out",
+            )
+        )
+    return False
+
+
 def http_form(
     url: str,
     form: Dict[str, str],
@@ -78,8 +101,16 @@ def http_form(
 def wait_for_model(base_url: str, timeout_s: int) -> None:
     deadline = time.time() + timeout_s
     last_detail = None
+    health_url = f"{base_url.rstrip('/')}/health"
     while time.time() < deadline:
-        status, body = http_json("GET", f"{base_url.rstrip('/')}/health")
+        try:
+            status, body = http_json("GET", health_url, timeout=15)
+        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as exc:
+            if not _is_transient_http_error(exc):
+                raise
+            last_detail = {"transient_error": str(exc)}
+            time.sleep(2)
+            continue
         if status == 200 and body.get("model_loaded") is True:
             return
         last_detail = body
@@ -124,7 +155,15 @@ def main() -> int:
 
     wait_for_model(base, args.timeout)
 
-    status, health = http_json("GET", f"{base}/health")
+    # Ещё одна попытка после ожидания — иногда первый «успешный» /health сразу даёт сбой на следующем запросе
+    for attempt in range(3):
+        try:
+            status, health = http_json("GET", f"{base}/health", timeout=30)
+            break
+        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as exc:
+            if attempt == 2 or not _is_transient_http_error(exc):
+                raise
+            time.sleep(2)
     assert status == 200, health
     assert health.get("model_loaded") is True, health
 
