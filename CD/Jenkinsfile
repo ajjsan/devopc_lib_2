@@ -1,13 +1,21 @@
-/* Jenkins CD: pull образа, запуск контейнера, функциональные тесты.
+/* Jenkins CD: Postgres в контейнере + API из Docker Hub (docker-compose.jenkins.yml).
  *
- * Совместимость: Jenkins agent может быть Windows или Linux.
- * На Windows используется `bat`, на Linux — `sh`.
+ * Агент: Linux или Windows с Docker Compose v2.
  *
- * Credentials:
- * - dockerhub (Username with password), credentialsId: dockerhub
+ * Credentials (ID можно сменить параметрами CRED_ID_*):
  *
- * Если образ собран без модели, задайте HOST_MODEL_FILE (путь на агенте Jenkins),
- * файл будет смонтирован в /app/experiments/tfidf_log_reg.pkl
+ * 1) dockerhub — Username with password (pull образа API)
+ *
+ * 2) mle-cd-jwt-secret — Secret text → JWT_SECRET_KEY
+ *
+ * 3) mle-cd-api-auth — Username with password → API_USERNAME / API_PASSWORD
+ *
+ * 4) mle-cd-postgres — Username with password → POSTGRES_USER / POSTGRES_PASSWORD
+ *
+ * 5) mle-cd-postgres-db — Secret text → имя БД (POSTGRES_DB), одна строка без пробелов
+ *
+ * Образ API должен содержать модель experiments/tfidf_log_reg.pkl либо собирайте образ в CI с моделью.
+ * DATABASE_URL в контейнере api не задаётся: приложение строит URL из POSTGRES_* и POSTGRES_HOST=db.
  */
 
 pipeline {
@@ -23,13 +31,36 @@ pipeline {
         string(name: 'IMAGE_NAME', defaultValue: 'mle-template-api', description: 'Имя образа')
         string(name: 'IMAGE_TAG', defaultValue: 'latest', description: 'Тег образа')
 
-        string(name: 'HOST_PORT', defaultValue: '8000', description: 'Порт на хосте')
-        string(name: 'CONTAINER_NAME', defaultValue: 'mle-template-api-cd', description: 'Имя контейнера')
+        string(name: 'HOST_PORT', defaultValue: '8000', description: 'Порт API на хосте агента')
+        string(
+            name: 'COMPOSE_PROJECT_NAME',
+            defaultValue: 'mle-cd',
+            description: 'Имя проекта docker compose (изоляция на агенте)'
+        )
 
-        string(name: 'HOST_MODEL_FILE', defaultValue: '', description: 'Необязательно: путь к tfidf_log_reg.pkl на агенте для bind-mount')
+        string(
+            name: 'CRED_ID_JWT',
+            defaultValue: 'mle-cd-jwt-secret',
+            description: 'Secret text: JWT_SECRET_KEY'
+        )
+        string(
+            name: 'CRED_ID_API',
+            defaultValue: 'mle-cd-api-auth',
+            description: 'Username with password: API'
+        )
+        string(
+            name: 'CRED_ID_POSTGRES',
+            defaultValue: 'mle-cd-postgres',
+            description: 'Username with password: Postgres (POSTGRES_USER / POSTGRES_PASSWORD)'
+        )
+        string(
+            name: 'CRED_ID_POSTGRES_DB',
+            defaultValue: 'mle-cd-postgres-db',
+            description: 'Secret text: имя БД (POSTGRES_DB)'
+        )
 
         booleanParam(name: 'RUN_FUNCTIONAL_TESTS', defaultValue: true, description: 'Запуск scripts/functional_test_api.py')
-        booleanParam(name: 'KEEP_CONTAINER', defaultValue: false, description: 'Если true — не удалять контейнер после прогона')
+        booleanParam(name: 'KEEP_STACK', defaultValue: false, description: 'Если true — не останавливать compose и не удалять volume после прогона')
     }
 
     environment {
@@ -37,13 +68,13 @@ pipeline {
     }
 
     stages {
-        stage('Checkout (tests)') {
+        stage('Checkout (compose + tests)') {
             steps {
                 checkout scm
             }
         }
 
-        stage('Docker login + pull') {
+        stage('Docker login + pull API image') {
             steps {
                 script {
                     withEnv([
@@ -70,18 +101,21 @@ pipeline {
             }
         }
 
-        stage('Stop old container') {
+        stage('Compose down (previous run)') {
+            when {
+                expression { return !params.KEEP_STACK.toBoolean() }
+            }
             steps {
                 script {
-                    withEnv(["CONTAINER_NAME=${params.CONTAINER_NAME}"]) {
+                    withEnv(["COMPOSE_PROJECT_NAME=${params.COMPOSE_PROJECT_NAME}"]) {
                         if (isUnix()) {
                             sh '''
-                                docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+                                docker compose -f docker-compose.jenkins.yml -p "${COMPOSE_PROJECT_NAME}" down -v --remove-orphans || true
                             '''
                         } else {
                             bat '''
                                 @echo off
-                                docker rm -f %CONTAINER_NAME% >nul 2>&1
+                                docker compose -f docker-compose.jenkins.yml -p %COMPOSE_PROJECT_NAME% down -v --remove-orphans
                                 exit /b 0
                             '''
                         }
@@ -90,45 +124,43 @@ pipeline {
             }
         }
 
-        stage('Run container') {
+        stage('Compose up (Postgres + API)') {
             steps {
                 script {
-                    withEnv([
-                        "DOCKER_REGISTRY=${params.DOCKER_REGISTRY}",
-                        "DOCKER_NAMESPACE=${params.DOCKER_NAMESPACE}",
-                        "IMAGE_NAME=${params.IMAGE_NAME}",
-                        "IMAGE_TAG=${params.IMAGE_TAG}",
-                        "HOST_PORT=${params.HOST_PORT}",
-                        "CONTAINER_NAME=${params.CONTAINER_NAME}",
-                        "HOST_MODEL_FILE=${params.HOST_MODEL_FILE}",
+                    withCredentials([
+                        string(credentialsId: params.CRED_ID_JWT, variable: 'JWT_SECRET_KEY'),
+                        usernamePassword(
+                            credentialsId: params.CRED_ID_API,
+                            usernameVariable: 'API_USERNAME',
+                            passwordVariable: 'API_PASSWORD'
+                        ),
+                        usernamePassword(
+                            credentialsId: params.CRED_ID_POSTGRES,
+                            usernameVariable: 'POSTGRES_USER',
+                            passwordVariable: 'POSTGRES_PASSWORD'
+                        ),
+                        string(credentialsId: params.CRED_ID_POSTGRES_DB, variable: 'POSTGRES_DB'),
                     ]) {
-                        if (isUnix()) {
-                            sh '''
-                                set -eux
-                                if [ -n "${HOST_MODEL_FILE}" ]; then
-                                  test -f "${HOST_MODEL_FILE}"
-                                  docker run -d \
-                                    --name "${CONTAINER_NAME}" \
-                                    -p "${HOST_PORT}:8000" \
-                                    -v "${HOST_MODEL_FILE}:/app/experiments/tfidf_log_reg.pkl:ro" \
-                                    "${DOCKER_NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}"
-                                else
-                                  docker run -d \
-                                    --name "${CONTAINER_NAME}" \
-                                    -p "${HOST_PORT}:8000" \
-                                    "${DOCKER_NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}"
-                                fi
-                            '''
-                        } else {
-                            bat '''
-                                @echo off
-                                if not "%HOST_MODEL_FILE%"=="" (
-                                  if not exist "%HOST_MODEL_FILE%" exit /b 1
-                                  docker run -d --name %CONTAINER_NAME% -p %HOST_PORT%:8000 -v "%HOST_MODEL_FILE%:/app/experiments/tfidf_log_reg.pkl:ro" %DOCKER_NAMESPACE%/%IMAGE_NAME%:%IMAGE_TAG%
-                                ) else (
-                                  docker run -d --name %CONTAINER_NAME% -p %HOST_PORT%:8000 %DOCKER_NAMESPACE%/%IMAGE_NAME%:%IMAGE_TAG%
-                                )
-                            '''
+                        withEnv([
+                            "DOCKER_NAMESPACE=${params.DOCKER_NAMESPACE}",
+                            "IMAGE_NAME=${params.IMAGE_NAME}",
+                            "IMAGE_TAG=${params.IMAGE_TAG}",
+                            "HOST_PORT=${params.HOST_PORT}",
+                            "COMPOSE_PROJECT_NAME=${params.COMPOSE_PROJECT_NAME}",
+                        ]) {
+                            if (isUnix()) {
+                                sh '''
+                                    set -eux
+                                    export MLE_DOCKER_IMAGE="${DOCKER_NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}"
+                                    docker compose -f docker-compose.jenkins.yml -p "${COMPOSE_PROJECT_NAME}" up -d
+                                '''
+                            } else {
+                                bat '''
+                                    @echo off
+                                    set MLE_DOCKER_IMAGE=%DOCKER_NAMESPACE%/%IMAGE_NAME%:%IMAGE_TAG%
+                                    docker compose -f docker-compose.jenkins.yml -p %COMPOSE_PROJECT_NAME% up -d
+                                '''
+                            }
                         }
                     }
                 }
@@ -141,17 +173,27 @@ pipeline {
             }
             steps {
                 script {
-                    withEnv(["HOST_PORT=${params.HOST_PORT}"]) {
-                        if (isUnix()) {
-                            sh '''
-                                set -eux
-                                python scripts/functional_test_api.py --base-url "http://127.0.0.1:${HOST_PORT}" --timeout 180
-                            '''
-                        } else {
-                            bat '''
-                                @echo off
-                                python scripts/functional_test_api.py --base-url http://127.0.0.1:%HOST_PORT% --timeout 180
-                            '''
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: params.CRED_ID_API,
+                            usernameVariable: 'API_USERNAME',
+                            passwordVariable: 'API_PASSWORD'
+                        ),
+                    ]) {
+                        withEnv([
+                            "HOST_PORT=${params.HOST_PORT}",
+                        ]) {
+                            if (isUnix()) {
+                                sh '''
+                                    set -eux
+                                    python scripts/functional_test_api.py --base-url "http://127.0.0.1:${HOST_PORT}" --timeout 180
+                                '''
+                            } else {
+                                bat '''
+                                    @echo off
+                                    python scripts/functional_test_api.py --base-url http://127.0.0.1:%HOST_PORT% --timeout 180
+                                '''
+                            }
                         }
                     }
                 }
@@ -162,16 +204,16 @@ pipeline {
     post {
         always {
             script {
-                if (!params.KEEP_CONTAINER.toBoolean()) {
-                    withEnv(["CONTAINER_NAME=${params.CONTAINER_NAME}"]) {
+                if (!params.KEEP_STACK.toBoolean()) {
+                    withEnv(["COMPOSE_PROJECT_NAME=${params.COMPOSE_PROJECT_NAME}"]) {
                         if (isUnix()) {
                             sh '''
-                                docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+                                docker compose -f docker-compose.jenkins.yml -p "${COMPOSE_PROJECT_NAME}" down -v --remove-orphans || true
                             '''
                         } else {
                             bat '''
                                 @echo off
-                                docker rm -f %CONTAINER_NAME% >nul 2>&1
+                                docker compose -f docker-compose.jenkins.yml -p %COMPOSE_PROJECT_NAME% down -v --remove-orphans
                                 exit /b 0
                             '''
                         }

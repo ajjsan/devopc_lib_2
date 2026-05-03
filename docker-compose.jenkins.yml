@@ -1,0 +1,42 @@
+# CD (Jenkins): Postgres + API в одной сети. Образ API из реестра, не локальный build.
+# Запуск (пример): все переменные в окружении + docker compose -f docker-compose.jenkins.yml -p mle-cd up -d
+#
+# Обязательно в env: POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, JWT_SECRET_KEY,
+# API_USERNAME, API_PASSWORD, MLE_DOCKER_IMAGE (полное имя образа, напр. docker.io/user/repo:tag),
+# HOST_PORT. DATABASE_URL не задаём — в api используется POSTGRES_HOST=db.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Задай POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Задай POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?Задай POSTGRES_DB}
+    volumes:
+      - jenkins_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    image: ${MLE_DOCKER_IMAGE:?Задай MLE_DOCKER_IMAGE}
+    ports:
+      - "${HOST_PORT:?Задай HOST_PORT}:8000"
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:?}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?}
+      API_USERNAME: ${API_USERNAME:?}
+      API_PASSWORD: ${API_PASSWORD:?}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["python", "-m", "uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]
+
+volumes:
+  jenkins_pgdata:

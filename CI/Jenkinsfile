@@ -9,6 +9,8 @@
  * Credentials:
  * - dockerhub (Username with password), credentialsId: dockerhub
  *
+ * CD job дополнительно требует Secret text / Username+password — см. комментарий в CD/Jenkinsfile.
+ *
  * Нужен файл модели в workspace до сборки:
  *   experiments/tfidf_log_reg.pkl
  */
@@ -207,7 +209,7 @@ pipeline {
                         string(name: 'DOCKER_REGISTRY', value: params.DOCKER_REGISTRY),
                         string(name: 'IMAGE_TAG', value: tag),
                         booleanParam(name: 'RUN_FUNCTIONAL_TESTS', value: true),
-                        booleanParam(name: 'KEEP_CONTAINER', value: false)
+                        booleanParam(name: 'KEEP_STACK', value: false)
                     ]
                 }
             }

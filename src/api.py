@@ -1,10 +1,17 @@
 import configparser
 import os
 import pickle
+from contextlib import asynccontextmanager
 from functools import lru_cache
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from . import auth
+from .database import get_db, init_db
+from .db_models import PredictionRecord
 
 CONFIG_PATH = os.path.join(os.getcwd(), "config.ini")
 
@@ -24,6 +31,7 @@ class PredictRequest(BaseModel):
 class PredictResponse(BaseModel):
     sentiment: int
     label: str
+    prediction_id: int | None = Field(default=None, description="ID записи в БД")
 
 
 class PredictBatchRequest(BaseModel):
@@ -40,10 +48,28 @@ class HealthResponse(BaseModel):
     model_loaded: bool
 
 
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    init_db()
+    yield
+
+
 app = FastAPI(
     title="Twitter Sentiment API",
-    description="API сервис для предсказания тональности текста с помощью TF-IDF + LogisticRegression.",
+    description=(
+        "Классификация тональности (TF-IDF + LogisticRegression). "
+        "**Swagger:** нажми **Authorize**, выбери OAuth2 Password, укажи `username` и `password` "
+        "как в `.env` (`API_USERNAME`, `API_PASSWORD`). После входа заголовок `Authorization` "
+        "подставится сам для `/predict` и `/predict-batch`. "
+        "Поле **client_id** можно оставить пустым."
+    ),
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 
@@ -65,7 +91,21 @@ def sentiment_to_label(sentiment: int) -> str:
 
 @app.get("/", tags=["service"])
 def root():
-    return {"message": "Twitter Sentiment API is running"}
+    return {
+        "message": "Twitter Sentiment API is running",
+        "auth": {
+            "swagger": "GET /docs → Authorize → OAuth2 Password: username/password из .env (API_USERNAME, API_PASSWORD)",
+            "curl": "POST /auth/token + заголовок Authorization: Bearer <access_token> для /predict",
+        },
+    }
+
+
+@app.post("/auth/token", response_model=TokenResponse, tags=["auth"])
+def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    if not auth.verify_credentials(form_data.username, form_data.password):
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+    token = auth.create_access_token(form_data.username)
+    return TokenResponse(access_token=token)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["service"])
@@ -84,7 +124,11 @@ def health_check():
 
 
 @app.post("/predict", response_model=PredictResponse, tags=["inference"])
-def predict_sentiment(payload: PredictRequest):
+def predict_sentiment(
+    payload: PredictRequest,
+    db: Session = Depends(get_db),
+    _user: str = Depends(auth.get_current_user),
+):
     try:
         model = load_model()
     except FileNotFoundError as exc:
@@ -95,14 +139,25 @@ def predict_sentiment(payload: PredictRequest):
         raise HTTPException(status_code=400, detail="Поле text не должно быть пустым")
 
     sentiment = int(model.predict([text])[0])
-    return PredictResponse(
+    label = sentiment_to_label(sentiment)
+    row = PredictionRecord(
+        input_text=text,
         sentiment=sentiment,
-        label=sentiment_to_label(sentiment),
+        label=label,
+        batch_index=None,
     )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return PredictResponse(sentiment=sentiment, label=label, prediction_id=row.id)
 
 
 @app.post("/predict-batch", response_model=PredictBatchResponse, tags=["inference"])
-def predict_batch(payload: PredictBatchRequest):
+def predict_batch(
+    payload: PredictBatchRequest,
+    db: Session = Depends(get_db),
+    _user: str = Depends(auth.get_current_user),
+):
     try:
         model = load_model()
     except FileNotFoundError as exc:
@@ -113,8 +168,18 @@ def predict_batch(payload: PredictBatchRequest):
         raise HTTPException(status_code=400, detail="В поле texts не должно быть пустых строк")
 
     sentiments = model.predict(cleaned_texts)
-    predictions = [
-        PredictResponse(sentiment=int(sentiment), label=sentiment_to_label(int(sentiment)))
-        for sentiment in sentiments
-    ]
+    predictions: list[PredictResponse] = []
+    for idx, (text, sentiment_raw) in enumerate(zip(cleaned_texts, sentiments, strict=True)):
+        sentiment = int(sentiment_raw)
+        label = sentiment_to_label(sentiment)
+        row = PredictionRecord(
+            input_text=text,
+            sentiment=sentiment,
+            label=label,
+            batch_index=idx,
+        )
+        db.add(row)
+        db.flush()
+        predictions.append(PredictResponse(sentiment=sentiment, label=label, prediction_id=row.id))
+    db.commit()
     return PredictBatchResponse(predictions=predictions)

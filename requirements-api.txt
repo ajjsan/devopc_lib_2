@@ -3,3 +3,9 @@ pandas
 scikit-learn
 fastapi
 uvicorn
+sqlalchemy
+psycopg2-binary
+python-dotenv
+pydantic-settings
+python-jose[cryptography]
+python-multipart
