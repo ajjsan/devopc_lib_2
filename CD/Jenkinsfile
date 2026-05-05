@@ -1,25 +1,5 @@
-/* Jenkins CD: Postgres в контейнере + API из Docker Hub (docker-compose.jenkins.yml).
- *
- * Агент: Linux или Windows с Docker Compose v2.
- *
- * Credentials (ID можно сменить параметрами CRED_ID_*):
- *
- * 1) dockerhub — Username with password (pull образа API)
- *
- * 2) mle-cd-jwt-secret — Secret text → JWT_SECRET_KEY
- *
- * 3) mle-cd-api-auth — Username with password → API_USERNAME / API_PASSWORD
- *
- * 4) mle-cd-postgres — Username with password → POSTGRES_USER / POSTGRES_PASSWORD
- *
- * 5) mle-cd-postgres-db — Secret text → имя БД (POSTGRES_DB), одна строка без пробелов
- *
- * Образ API должен содержать модель experiments/tfidf_log_reg.pkl либо собирайте образ в CI с моделью.
- * DATABASE_URL в контейнере api не задаётся: приложение строит URL из POSTGRES_* и POSTGRES_HOST=db.
- */
-
 pipeline {
-    agent any
+    agent { label 'windows' }
 
     options {
         timestamps()
@@ -83,19 +63,10 @@ pipeline {
                         "IMAGE_NAME=${params.IMAGE_NAME}",
                         "IMAGE_TAG=${params.IMAGE_TAG}",
                     ]) {
-                        if (isUnix()) {
-                            sh '''
-                                set -eux
-                                echo "${DOCKERHUB_PSW}" | docker login "${DOCKER_REGISTRY}" -u "${DOCKERHUB_USR}" --password-stdin
-                                docker pull "${DOCKER_NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}"
-                            '''
-                        } else {
-                            bat '''
-                                @echo off
-                                echo %DOCKERHUB_PSW%| docker login %DOCKER_REGISTRY% -u %DOCKERHUB_USR% --password-stdin
-                                docker pull %DOCKER_NAMESPACE%/%IMAGE_NAME%:%IMAGE_TAG%
-                            '''
-                        }
+                        powershell '''
+                            $env:DOCKERHUB_PSW | docker login "$env:DOCKER_REGISTRY" -u "$env:DOCKERHUB_USR" --password-stdin
+                            docker pull "$env:DOCKER_NAMESPACE/$env:IMAGE_NAME`:$env:IMAGE_TAG"
+                        '''
                     }
                 }
             }
@@ -108,17 +79,13 @@ pipeline {
             steps {
                 script {
                     withEnv(["COMPOSE_PROJECT_NAME=${params.COMPOSE_PROJECT_NAME}"]) {
-                        if (isUnix()) {
-                            sh '''
-                                docker compose -f docker-compose.jenkins.yml -p "${COMPOSE_PROJECT_NAME}" down -v --remove-orphans || true
-                            '''
-                        } else {
-                            bat '''
-                                @echo off
-                                docker compose -f docker-compose.jenkins.yml -p %COMPOSE_PROJECT_NAME% down -v --remove-orphans
-                                exit /b 0
-                            '''
-                        }
+                        powershell '''
+                            try {
+                              docker compose -f docker-compose.jenkins.yml -p "$env:COMPOSE_PROJECT_NAME" down -v --remove-orphans | Out-Null
+                            } catch {
+                              # ignore
+                            }
+                        '''
                     }
                 }
             }
@@ -148,22 +115,11 @@ pipeline {
                             "HOST_PORT=${params.HOST_PORT}",
                             "COMPOSE_PROJECT_NAME=${params.COMPOSE_PROJECT_NAME}",
                         ]) {
-                            if (isUnix()) {
-                                sh '''
-                                    set -eux
-                                    export MLE_DOCKER_IMAGE="${DOCKER_NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}"
-                                    docker compose -f docker-compose.jenkins.yml -p "${COMPOSE_PROJECT_NAME}" up -d
-                                    sleep 8
-                                '''
-                            } else {
-                                bat '''
-                                    @echo off
-                                    set MLE_DOCKER_IMAGE=%DOCKER_NAMESPACE%/%IMAGE_NAME%:%IMAGE_TAG%
-                                    docker compose -f docker-compose.jenkins.yml -p %COMPOSE_PROJECT_NAME% up -d
-                                    rem timeout /t не работает в Jenkins bat (нет интерактивного stdin) — даёт exit 1
-                                    ping -n 9 127.0.0.1 >nul
-                                '''
-                            }
+                            powershell '''
+                                $env:MLE_DOCKER_IMAGE = "$env:DOCKER_NAMESPACE/$env:IMAGE_NAME`:$env:IMAGE_TAG"
+                                docker compose -f docker-compose.jenkins.yml -p "$env:COMPOSE_PROJECT_NAME" up -d
+                                Start-Sleep -Seconds 8
+                            '''
                         }
                     }
                 }
@@ -186,17 +142,9 @@ pipeline {
                         withEnv([
                             "HOST_PORT=${params.HOST_PORT}",
                         ]) {
-                            if (isUnix()) {
-                                sh '''
-                                    set -eux
-                                    python scripts/functional_test_api.py --base-url "http://127.0.0.1:${HOST_PORT}" --timeout 180
-                                '''
-                            } else {
-                                bat '''
-                                    @echo off
-                                    python scripts/functional_test_api.py --base-url http://127.0.0.1:%HOST_PORT% --timeout 180
-                                '''
-                            }
+                            powershell '''
+                                python scripts/functional_test_api.py --base-url "http://127.0.0.1:$env:HOST_PORT" --timeout 180
+                            '''
                         }
                     }
                 }
@@ -209,31 +157,23 @@ pipeline {
             script {
                 if (!params.KEEP_STACK.toBoolean()) {
                     withEnv(["COMPOSE_PROJECT_NAME=${params.COMPOSE_PROJECT_NAME}"]) {
-                        if (isUnix()) {
-                            sh '''
-                                docker compose -f docker-compose.jenkins.yml -p "${COMPOSE_PROJECT_NAME}" down -v --remove-orphans || true
-                            '''
-                        } else {
-                            bat '''
-                                @echo off
-                                docker compose -f docker-compose.jenkins.yml -p %COMPOSE_PROJECT_NAME% down -v --remove-orphans
-                                exit /b 0
-                            '''
-                        }
+                        powershell '''
+                            try {
+                              docker compose -f docker-compose.jenkins.yml -p "$env:COMPOSE_PROJECT_NAME" down -v --remove-orphans | Out-Null
+                            } catch {
+                              # ignore
+                            }
+                        '''
                     }
                 }
                 withEnv(["DOCKER_REGISTRY=${params.DOCKER_REGISTRY}"]) {
-                    if (isUnix()) {
-                        sh '''
-                            docker logout "${DOCKER_REGISTRY}" || true
-                        '''
-                    } else {
-                        bat '''
-                            @echo off
-                            docker logout %DOCKER_REGISTRY%
-                            exit /b 0
-                        '''
-                    }
+                    powershell '''
+                        try {
+                          docker logout "$env:DOCKER_REGISTRY" | Out-Null
+                        } catch {
+                          # ignore
+                        }
+                    '''
                 }
             }
         }
