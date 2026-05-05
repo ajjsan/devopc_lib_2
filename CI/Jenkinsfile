@@ -67,15 +67,20 @@ pipeline {
                         def tagCi = "ci-${branchSlug}-${env.BUILD_NUMBER}-${shortSha}"
 
                         writeFile file: 'ci_tags.env', text: "TAG_CI=${tagCi}\n"
-                        powershell """
-                            docker tag "$($env:IMAGE_NAME):ci-$env:BUILD_NUMBER-${shortSha}" "$env:DOCKER_NAMESPACE/$($env:IMAGE_NAME):${tagCi}"
-                            docker tag "$($env:IMAGE_NAME):ci-$env:BUILD_NUMBER-${shortSha}" "$env:DOCKER_NAMESPACE/$($env:IMAGE_NAME):latest"
+                        withEnv([
+                            "SHORT_SHA=${shortSha}",
+                            "TAG_CI=${tagCi}",
+                        ]) {
+                            powershell '''
+                                docker tag "$($env:IMAGE_NAME):ci-$env:BUILD_NUMBER-$env:SHORT_SHA" "$env:DOCKER_NAMESPACE/$($env:IMAGE_NAME):$env:TAG_CI"
+                                docker tag "$($env:IMAGE_NAME):ci-$env:BUILD_NUMBER-$env:SHORT_SHA" "$env:DOCKER_NAMESPACE/$($env:IMAGE_NAME):latest"
 
-                            $env:DOCKERHUB_PSW | docker login "$env:DOCKER_REGISTRY" -u "$env:DOCKERHUB_USR" --password-stdin
+                                $env:DOCKERHUB_PSW | docker login "$env:DOCKER_REGISTRY" -u "$env:DOCKERHUB_USR" --password-stdin
 
-                            docker push "$env:DOCKER_NAMESPACE/$($env:IMAGE_NAME):${tagCi}"
-                            docker push "$env:DOCKER_NAMESPACE/$($env:IMAGE_NAME):latest"
-                        """
+                                docker push "$env:DOCKER_NAMESPACE/$($env:IMAGE_NAME):$env:TAG_CI"
+                                docker push "$env:DOCKER_NAMESPACE/$($env:IMAGE_NAME):latest"
+                            '''
+                        }
                     }
                 }
             }
