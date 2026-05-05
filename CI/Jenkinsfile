@@ -10,12 +10,7 @@ pipeline {
         string(name: 'DOCKER_NAMESPACE', defaultValue: 'ajjsan', description: 'Docker Hub namespace/user')
         string(name: 'IMAGE_NAME', defaultValue: 'mle-template-api', description: 'Имя репозитория образа на Docker Hub')
         string(name: 'DOCKER_REGISTRY', defaultValue: 'docker.io', description: 'Реестр (обычно docker.io)')
-        booleanParam(name: 'PUSH_IMAGE', defaultValue: true, description: 'Делать docker login + push образа')
-        booleanParam(name: 'ONLY_MAIN_BRANCH', defaultValue: false, description: 'Если true — push только для сборок ветки main (НЕ PR), полезно для обычного Pipeline job')
-        booleanParam(name: 'ONLY_PR_TO_MAIN', defaultValue: false, description: 'Если true — push только для PR, у которых target branch = main')
-        booleanParam(name: 'TRIGGER_CD', defaultValue: true, description: 'После успешного push запустить CD job')
         string(name: 'CD_JOB', defaultValue: 'CD job', description: 'Имя CD job в Jenkins (например folder/cd-mle-api). Пусто = не запускать')
-        string(name: 'CD_DEPLOY_TAG', defaultValue: '', description: 'Тег образа для CD (пусто = использовать тег из CI)')
     }
 
     environment {
@@ -23,23 +18,13 @@ pipeline {
     }
 
     stages {
-        stage('Preflight') {
-            steps {
-                script {
-                    if (!env.CHANGE_ID) {
-                        echo 'INFO: CHANGE_ID пустой — это не PR-сборка Multibranch. Для автоматизации по PR используйте Multibranch Pipeline + webhook.'
-                    }
-                }
-            }
-        }
-
         stage('Checkout') {
             steps {
                 checkout scm
             }
         }
 
-        stage('Verify model artifact (recommended)') {
+        stage('Verify model artifact') {
             steps {
                 powershell '''
                     if (-not (Test-Path -LiteralPath "experiments\\tfidf_log_reg.pkl")) {
@@ -65,40 +50,13 @@ pipeline {
             }
         }
 
-        stage('Docker login + push') {
-            when {
-                expression { return params.PUSH_IMAGE.toBoolean() }
-            }
+        stage('Docker push') {
             steps {
                 script {
-                    def isPr = env.CHANGE_ID?.trim() ? true : false
-
                     def branchSlug = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: 'branch')
                         .replaceFirst(/^origin\//, '')
                         .replaceAll(/[^A-Za-z0-9._-]+/, '-')
                         .replaceAll(/^-+|-+$/, '')
-
-                    def gateOk = true
-                    def gateReason = ''
-
-                    if (params.ONLY_PR_TO_MAIN.toBoolean()) {
-                        gateOk = isPr && (env.CHANGE_TARGET == 'main')
-                        gateReason = 'ONLY_PR_TO_MAIN=true requires a PR build into main'
-                    } else if (params.ONLY_MAIN_BRANCH.toBoolean()) {
-                        def branchName = env.BRANCH_NAME ?: ''
-                        def gitBranch = env.GIT_BRANCH ?: ''
-                        def onMainBranch =
-                            (branchName == 'main') ||
-                            gitBranch.endsWith('/main') ||
-                            (gitBranch == 'main')
-                        gateOk = (!isPr) && onMainBranch
-                        gateReason = 'ONLY_MAIN_BRANCH=true requires a non-PR build of main'
-                    }
-
-                    if (!gateOk) {
-                        echo "SKIP push: ${gateReason} (CHANGE_ID=${env.CHANGE_ID}, CHANGE_TARGET=${env.CHANGE_TARGET}, BRANCH_NAME=${env.BRANCH_NAME}, GIT_BRANCH=${env.GIT_BRANCH})"
-                        return
-                    }
 
                     withEnv([
                         "DOCKER_REGISTRY=${params.DOCKER_REGISTRY}",
@@ -106,13 +64,7 @@ pipeline {
                         "IMAGE_NAME=${params.IMAGE_NAME}",
                     ]) {
                         def shortSha = powershell(script: "git rev-parse --short HEAD", returnStdout: true).trim()
-
-                        def tagCi = null
-                        if (isPr) {
-                            tagCi = "pr-${env.CHANGE_ID}-${env.BUILD_NUMBER}-${shortSha}"
-                        } else {
-                            tagCi = "ci-${branchSlug}-${env.BUILD_NUMBER}-${shortSha}"
-                        }
+                        def tagCi = "ci-${branchSlug}-${env.BUILD_NUMBER}-${shortSha}"
 
                         writeFile file: 'ci_tags.env', text: "TAG_CI=${tagCi}\n"
                         powershell """
@@ -131,19 +83,12 @@ pipeline {
 
         stage('Trigger CD') {
             when {
-                allOf {
-                    expression { return params.TRIGGER_CD.toBoolean() }
-                    expression { return params.CD_JOB?.trim() }
-                    expression { return params.PUSH_IMAGE.toBoolean() }
-                }
+                expression { return params.CD_JOB?.trim() }
             }
             steps {
                 script {
-                    def tag = params.CD_DEPLOY_TAG?.trim()
-                    if (!tag) {
-                        def props = readFile('ci_tags.env').split('\n').find { it.startsWith('TAG_CI=') }
-                        tag = props?.replace('TAG_CI=', '')?.trim()
-                    }
+                    def props = readFile('ci_tags.env').split('\n').find { it.startsWith('TAG_CI=') }
+                    def tag = props?.replace('TAG_CI=', '')?.trim()
                     if (!tag) {
                         error('Cannot resolve tag for CD (ci_tags.env missing TAG_CI?)')
                     }

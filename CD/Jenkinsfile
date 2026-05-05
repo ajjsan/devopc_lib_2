@@ -48,13 +48,13 @@ pipeline {
     }
 
     stages {
-        stage('Checkout (compose + tests)') {
+        stage('Checkout') {
             steps {
                 checkout scm
             }
         }
 
-        stage('Docker login + pull API image') {
+        stage('Docker pull API image') {
             steps {
                 script {
                     withEnv([
@@ -91,7 +91,7 @@ pipeline {
             }
         }
 
-        stage('Compose up (Postgres + API)') {
+        stage('Compose up') {
             steps {
                 script {
                     withCredentials([
