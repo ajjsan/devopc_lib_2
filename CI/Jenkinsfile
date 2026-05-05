@@ -43,7 +43,7 @@ pipeline {
                     ]) {
                         powershell '''
                             $shortSha = (git rev-parse --short HEAD).Trim()
-                            docker build -t "$env:IMAGE_NAME:ci-$env:BUILD_NUMBER-$shortSha" .
+                            docker build -t "$($env:IMAGE_NAME):ci-$env:BUILD_NUMBER-$shortSha" .
                         '''
                     }
                 }
@@ -68,13 +68,13 @@ pipeline {
 
                         writeFile file: 'ci_tags.env', text: "TAG_CI=${tagCi}\n"
                         powershell """
-                            docker tag "$env:IMAGE_NAME:ci-$env:BUILD_NUMBER-${shortSha}" "$env:DOCKER_NAMESPACE/$env:IMAGE_NAME:${tagCi}"
-                            docker tag "$env:IMAGE_NAME:ci-$env:BUILD_NUMBER-${shortSha}" "$env:DOCKER_NAMESPACE/$env:IMAGE_NAME:latest"
+                            docker tag "$($env:IMAGE_NAME):ci-$env:BUILD_NUMBER-${shortSha}" "$env:DOCKER_NAMESPACE/$($env:IMAGE_NAME):${tagCi}"
+                            docker tag "$($env:IMAGE_NAME):ci-$env:BUILD_NUMBER-${shortSha}" "$env:DOCKER_NAMESPACE/$($env:IMAGE_NAME):latest"
 
                             $env:DOCKERHUB_PSW | docker login "$env:DOCKER_REGISTRY" -u "$env:DOCKERHUB_USR" --password-stdin
 
-                            docker push "$env:DOCKER_NAMESPACE/$env:IMAGE_NAME:${tagCi}"
-                            docker push "$env:DOCKER_NAMESPACE/$env:IMAGE_NAME:latest"
+                            docker push "$env:DOCKER_NAMESPACE/$($env:IMAGE_NAME):${tagCi}"
+                            docker push "$env:DOCKER_NAMESPACE/$($env:IMAGE_NAME):latest"
                         """
                     }
                 }
