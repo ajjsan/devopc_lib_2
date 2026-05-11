@@ -21,7 +21,7 @@ stages:
       - experiments/tfidf_log_reg.pkl
           cache: false
     metrics:
-      - experiments/metrics.json:
+      - experiments/metrics.json
           cache: false
 
   predict:

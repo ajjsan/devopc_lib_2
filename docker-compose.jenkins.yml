@@ -1,4 +1,4 @@
-# CD (Jenkins): Postgres + API в одной сети. Образ API из реестра, не локальный build.
+# CD (Jenkins): Postgres + API в одной сети. 
 # Запуск (пример): все переменные в окружении + docker compose -f docker-compose.jenkins.yml -p mle-cd up -d
 #
 # Обязательно в env: POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, JWT_SECRET_KEY,
